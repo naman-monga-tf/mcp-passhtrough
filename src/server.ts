@@ -9,12 +9,12 @@ const OKTA_ISSUER = "https://truefoundry.okta.com";
 // Okta org authorization server issues access tokens with aud = org URL
 const OKTA_AUDIENCE = "https://truefoundry.okta.com";
 
-// TrueFoundry platform tokens (live-demo tenant) are also accepted, since the
-// MCP Gateway's Token Passthrough forwards whichever token the caller used
-// for inbound auth: an IdP (Okta) JWT or a TrueFoundry token.
+// TrueFoundry platform tokens are also accepted, since the MCP Gateway's
+// Token Passthrough forwards whichever token the caller used for inbound
+// auth: an IdP (Okta) JWT or a TrueFoundry token.
 const TFY_ISSUER = "truefoundry.com";
 const TFY_JWKS_URL = "https://login.truefoundry.com/.well-known/jwks.json";
-const TFY_ALLOWED_TENANT = "live-demo";
+const TFY_ALLOWED_TENANTS = ["live-demo", "cdk"];
 
 // JWK set for Okta Org Authorization Server
 const oktaJwks = createRemoteJWKSet(new URL(`${OKTA_ISSUER}/oauth2/v1/keys`));
@@ -38,9 +38,9 @@ async function validatePlatformToken(token: string): Promise<boolean> {
     const { payload }: { payload: JWTPayload & { tenantName?: string } } =
       await jwtVerify(token, tfyJwks, { issuer: TFY_ISSUER });
 
-    if (payload.tenantName !== TFY_ALLOWED_TENANT) {
+    if (!payload.tenantName || !TFY_ALLOWED_TENANTS.includes(payload.tenantName)) {
       console.warn(
-        `[okta-calculator-mcp] Platform token tenant '${payload.tenantName}' not allowed; expected '${TFY_ALLOWED_TENANT}'.`
+        `[okta-calculator-mcp] Platform token tenant '${payload.tenantName}' not allowed; expected one of: ${TFY_ALLOWED_TENANTS.join(", ")}.`
       );
       return false;
     }
@@ -157,7 +157,7 @@ async function handleMcpRequest(
         error: {
           code: -32001,
           message:
-            "Unauthorized: token is not a valid Okta JWT or TrueFoundry (live-demo) token."
+            "Unauthorized: token is not a valid Okta JWT or TrueFoundry (live-demo/cdk) token."
         },
         id: null
       });
