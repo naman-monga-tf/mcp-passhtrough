@@ -9,32 +9,52 @@ const OKTA_ISSUER = "https://truefoundry.okta.com";
 // Okta org authorization server issues access tokens with aud = org URL
 const OKTA_AUDIENCE = "https://truefoundry.okta.com";
 
+// TrueFoundry platform tokens (live-demo tenant) are also accepted, since the
+// MCP Gateway's Token Passthrough forwards whichever token the caller used
+// for inbound auth: an IdP (Okta) JWT or a TrueFoundry token.
+const TFY_ISSUER = "truefoundry.com";
+const TFY_JWKS_URL = "https://login.truefoundry.com/.well-known/jwks.json";
+const TFY_ALLOWED_TENANT = "live-demo";
+
 // JWK set for Okta Org Authorization Server
-const jwks = createRemoteJWKSet(
-  new URL(`${OKTA_ISSUER}/oauth2/v1/keys`)
-);
+const oktaJwks = createRemoteJWKSet(new URL(`${OKTA_ISSUER}/oauth2/v1/keys`));
+const tfyJwks = createRemoteJWKSet(new URL(TFY_JWKS_URL));
 
 async function validateOktaToken(token: string): Promise<boolean> {
   try {
-    const result = await jwtVerify(token, jwks, {
+    await jwtVerify(token, oktaJwks, {
       issuer: OKTA_ISSUER,
       audience: OKTA_AUDIENCE
     });
-
-    const payload: JWTPayload = result.payload;
-
-    // Basic sanity checks – make sure the token is not expired, etc.
-    const now = Math.floor(Date.now() / 1000);
-    if (payload.exp && payload.exp < now) {
-      console.warn("[okta-calculator-mcp] Okta token is expired.");
-      return false;
-    }
-
     return true;
   } catch (err) {
-    console.error("[okta-calculator-mcp] Okta token validation failed:", err);
+    console.warn(`[okta-calculator-mcp] Not a valid Okta token: ${err}`);
     return false;
   }
+}
+
+async function validatePlatformToken(token: string): Promise<boolean> {
+  try {
+    const { payload }: { payload: JWTPayload & { tenantName?: string } } =
+      await jwtVerify(token, tfyJwks, { issuer: TFY_ISSUER });
+
+    if (payload.tenantName !== TFY_ALLOWED_TENANT) {
+      console.warn(
+        `[okta-calculator-mcp] Platform token tenant '${payload.tenantName}' not allowed; expected '${TFY_ALLOWED_TENANT}'.`
+      );
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.warn(`[okta-calculator-mcp] Not a valid platform token: ${err}`);
+    return false;
+  }
+}
+
+async function validateToken(token: string): Promise<boolean> {
+  return (
+    (await validateOktaToken(token)) || (await validatePlatformToken(token))
+  );
 }
 
 const calculatorInputSchema = {
@@ -121,9 +141,9 @@ async function handleMcpRequest(
     req.rawHeaders.push("Accept", normalized);
   }
 
-  // Okta auth: tool calls must carry a valid Okta JWT as a Bearer token.
-  // The TrueFoundry MCP Gateway forwards the caller's Authorization header
-  // when the server is registered with Token Passthrough auth.
+  // Tool calls must carry a valid Bearer token: either an Okta JWT or a
+  // TrueFoundry platform token (live-demo tenant). The MCP Gateway's Token
+  // Passthrough forwards the caller's inbound Authorization header as-is.
   // Discovery calls (initialize, tools/list) are allowed without a token.
   if (isToolCall(req.body)) {
     const authHeader = req.headers.authorization ?? "";
@@ -131,12 +151,13 @@ async function handleMcpRequest(
       ? authHeader.slice("Bearer ".length)
       : "";
 
-    if (!token || !(await validateOktaToken(token))) {
+    if (!token || !(await validateToken(token))) {
       res.status(401).json({
         jsonrpc: "2.0",
         error: {
           code: -32001,
-          message: "Unauthorized: invalid or missing Okta token."
+          message:
+            "Unauthorized: token is not a valid Okta JWT or TrueFoundry (live-demo) token."
         },
         id: null
       });
