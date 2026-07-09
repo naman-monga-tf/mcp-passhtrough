@@ -140,6 +140,26 @@ app.get("/health", (_req, res) => {
 });
 
 app.post("/mcp", async (req, res) => {
+  // Some MCP clients/gateways (e.g. TrueFoundry MCP Gateway) don't send
+  // "Accept: application/json, text/event-stream", which the SDK transport
+  // requires. Normalize the header so those requests aren't rejected.
+  // The SDK builds the web Request from req.rawHeaders (via Hono), so the
+  // raw header list must be rewritten, not just req.headers.
+  const accept = req.headers.accept ?? "";
+  if (
+    !accept.includes("application/json") ||
+    !accept.includes("text/event-stream")
+  ) {
+    const normalized = "application/json, text/event-stream";
+    req.headers.accept = normalized;
+    for (let i = req.rawHeaders.length - 2; i >= 0; i -= 2) {
+      if (req.rawHeaders[i].toLowerCase() === "accept") {
+        req.rawHeaders.splice(i, 2);
+      }
+    }
+    req.rawHeaders.push("Accept", normalized);
+  }
+
   const server = createServer();
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: undefined
