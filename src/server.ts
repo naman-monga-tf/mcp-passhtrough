@@ -1,5 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import express from "express";
 import { z } from "zod";
 import { createRemoteJWKSet, jwtVerify, JWTPayload } from "jose";
 
@@ -77,63 +78,107 @@ function withOktaAuth(
   };
 }
 
-const server = new McpServer({
-  name: "okta-calculator-mcp",
-  version: "0.1.0"
+function createServer(): McpServer {
+  const server = new McpServer({
+    name: "okta-calculator-mcp",
+    version: "0.1.0"
+  });
+
+  server.tool(
+    "add",
+    calculatorInputSchema,
+    withOktaAuth(async ({ a, b }) => ({
+      content: [{ type: "text", text: String(a + b) }]
+    }))
+  );
+
+  server.tool(
+    "subtract",
+    calculatorInputSchema,
+    withOktaAuth(async ({ a, b }) => ({
+      content: [{ type: "text", text: String(a - b) }]
+    }))
+  );
+
+  server.tool(
+    "multiply",
+    calculatorInputSchema,
+    withOktaAuth(async ({ a, b }) => ({
+      content: [{ type: "text", text: String(a * b) }]
+    }))
+  );
+
+  server.tool(
+    "divide",
+    calculatorInputSchema,
+    withOktaAuth(async ({ a, b }) => {
+      if (b === 0) {
+        return {
+          content: [
+            { type: "text", text: "Error: Cannot divide by zero" }
+          ],
+          isError: true
+        };
+      }
+
+      return {
+        content: [{ type: "text", text: String(a / b) }]
+      };
+    })
+  );
+
+  return server;
+}
+
+// Stateless Streamable HTTP transport: every request is handled independently,
+// which keeps the service horizontally scalable behind a load balancer.
+const app = express();
+app.use(express.json());
+
+app.get("/health", (_req, res) => {
+  res.json({ status: "ok" });
 });
 
-server.tool(
-  "add",
-  calculatorInputSchema,
-  withOktaAuth(async ({ a, b }) => ({
-    content: [{ type: "text", text: String(a + b) }]
-  }))
-);
-
-server.tool(
-  "subtract",
-  calculatorInputSchema,
-  withOktaAuth(async ({ a, b }) => ({
-    content: [{ type: "text", text: String(a - b) }]
-  }))
-);
-
-server.tool(
-  "multiply",
-  calculatorInputSchema,
-  withOktaAuth(async ({ a, b }) => ({
-    content: [{ type: "text", text: String(a * b) }]
-  }))
-);
-
-server.tool(
-  "divide",
-  calculatorInputSchema,
-  withOktaAuth(async ({ a, b }) => {
-    if (b === 0) {
-      return {
-        content: [
-          { type: "text", text: "Error: Cannot divide by zero" }
-        ],
-        isError: true
-      };
-    }
-
-    return {
-      content: [{ type: "text", text: String(a / b) }]
-    };
-  })
-);
-
-const transport = new StdioServerTransport();
-
-server
-  .connect(transport)
-  .then(() => {
-    console.log("[okta-calculator-mcp] Server started (stdio transport).");
-  })
-  .catch((err) => {
-    console.error("[okta-calculator-mcp] Failed to start server:", err);
-    process.exitCode = 1;
+app.post("/mcp", async (req, res) => {
+  const server = createServer();
+  const transport = new StreamableHTTPServerTransport({
+    sessionIdGenerator: undefined
   });
+
+  res.on("close", () => {
+    transport.close();
+    server.close();
+  });
+
+  try {
+    await server.connect(transport);
+    await transport.handleRequest(req, res, req.body);
+  } catch (err) {
+    console.error("[okta-calculator-mcp] Error handling MCP request:", err);
+    if (!res.headersSent) {
+      res.status(500).json({
+        jsonrpc: "2.0",
+        error: { code: -32603, message: "Internal server error" },
+        id: null
+      });
+    }
+  }
+});
+
+// Stateless server: session-based GET/DELETE are not supported
+app.get("/mcp", (_req, res) => {
+  res.status(405).json({
+    jsonrpc: "2.0",
+    error: { code: -32000, message: "Method not allowed" },
+    id: null
+  });
+});
+
+const PORT = Number(process.env.PORT ?? 8080);
+
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(
+    `[okta-calculator-mcp] Server listening on http://0.0.0.0:${PORT}/mcp`
+  );
+});
 
