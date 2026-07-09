@@ -37,46 +37,10 @@ async function validateOktaToken(token: string): Promise<boolean> {
   }
 }
 
-type CalculatorInput = {
-  a: number;
-  b: number;
-  oktaToken: string;
-};
-
 const calculatorInputSchema = {
   a: z.number(),
-  b: z.number(),
-  oktaToken: z
-    .string()
-    .describe("Okta access token (raw JWT from Okta).")
+  b: z.number()
 };
-
-type CalculatorResult = {
-  content: { type: "text"; text: string }[];
-  isError?: boolean;
-};
-
-function withOktaAuth(
-  handler: (input: CalculatorInput) => Promise<CalculatorResult>
-): (input: CalculatorInput) => Promise<CalculatorResult> {
-  return async (input) => {
-    const valid = await validateOktaToken(input.oktaToken);
-
-    if (!valid) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: "Invalid or expired Okta token."
-          }
-        ],
-        isError: true
-      };
-    }
-
-    return handler(input);
-  };
-}
 
 function createServer(): McpServer {
   const server = new McpServer({
@@ -84,48 +48,32 @@ function createServer(): McpServer {
     version: "0.1.0"
   });
 
-  server.tool(
-    "add",
-    calculatorInputSchema,
-    withOktaAuth(async ({ a, b }) => ({
-      content: [{ type: "text", text: String(a + b) }]
-    }))
-  );
+  server.tool("add", calculatorInputSchema, async ({ a, b }) => ({
+    content: [{ type: "text" as const, text: String(a + b) }]
+  }));
 
-  server.tool(
-    "subtract",
-    calculatorInputSchema,
-    withOktaAuth(async ({ a, b }) => ({
-      content: [{ type: "text", text: String(a - b) }]
-    }))
-  );
+  server.tool("subtract", calculatorInputSchema, async ({ a, b }) => ({
+    content: [{ type: "text" as const, text: String(a - b) }]
+  }));
 
-  server.tool(
-    "multiply",
-    calculatorInputSchema,
-    withOktaAuth(async ({ a, b }) => ({
-      content: [{ type: "text", text: String(a * b) }]
-    }))
-  );
+  server.tool("multiply", calculatorInputSchema, async ({ a, b }) => ({
+    content: [{ type: "text" as const, text: String(a * b) }]
+  }));
 
-  server.tool(
-    "divide",
-    calculatorInputSchema,
-    withOktaAuth(async ({ a, b }) => {
-      if (b === 0) {
-        return {
-          content: [
-            { type: "text", text: "Error: Cannot divide by zero" }
-          ],
-          isError: true
-        };
-      }
-
+  server.tool("divide", calculatorInputSchema, async ({ a, b }) => {
+    if (b === 0) {
       return {
-        content: [{ type: "text", text: String(a / b) }]
+        content: [
+          { type: "text" as const, text: "Error: Cannot divide by zero" }
+        ],
+        isError: true
       };
-    })
-  );
+    }
+
+    return {
+      content: [{ type: "text" as const, text: String(a / b) }]
+    };
+  });
 
   return server;
 }
@@ -139,7 +87,20 @@ app.get("/health", (_req, res) => {
   res.json({ status: "ok" });
 });
 
-app.post("/mcp", async (req, res) => {
+function isToolCall(body: unknown): boolean {
+  const messages = Array.isArray(body) ? body : [body];
+  return messages.some(
+    (m) =>
+      typeof m === "object" &&
+      m !== null &&
+      (m as { method?: string }).method === "tools/call"
+  );
+}
+
+async function handleMcpRequest(
+  req: express.Request,
+  res: express.Response
+): Promise<void> {
   // Some MCP clients/gateways (e.g. TrueFoundry MCP Gateway) don't send
   // "Accept: application/json, text/event-stream", which the SDK transport
   // requires. Normalize the header so those requests aren't rejected.
@@ -158,6 +119,29 @@ app.post("/mcp", async (req, res) => {
       }
     }
     req.rawHeaders.push("Accept", normalized);
+  }
+
+  // Okta auth: tool calls must carry a valid Okta JWT as a Bearer token.
+  // The TrueFoundry MCP Gateway forwards the caller's Authorization header
+  // when the server is registered with Token Passthrough auth.
+  // Discovery calls (initialize, tools/list) are allowed without a token.
+  if (isToolCall(req.body)) {
+    const authHeader = req.headers.authorization ?? "";
+    const token = authHeader.startsWith("Bearer ")
+      ? authHeader.slice("Bearer ".length)
+      : "";
+
+    if (!token || !(await validateOktaToken(token))) {
+      res.status(401).json({
+        jsonrpc: "2.0",
+        error: {
+          code: -32001,
+          message: "Unauthorized: invalid or missing Okta token."
+        },
+        id: null
+      });
+      return;
+    }
   }
 
   const server = createServer();
@@ -183,16 +167,23 @@ app.post("/mcp", async (req, res) => {
       });
     }
   }
-});
+}
+
+// Serve MCP at both /mcp and / so the gateway works regardless of
+// whether the registered URL includes the /mcp path.
+app.post("/mcp", handleMcpRequest);
+app.post("/", handleMcpRequest);
 
 // Stateless server: session-based GET/DELETE are not supported
-app.get("/mcp", (_req, res) => {
+const methodNotAllowed = (_req: express.Request, res: express.Response) => {
   res.status(405).json({
     jsonrpc: "2.0",
     error: { code: -32000, message: "Method not allowed" },
     id: null
   });
-});
+};
+app.get("/mcp", methodNotAllowed);
+app.get("/", methodNotAllowed);
 
 const PORT = Number(process.env.PORT ?? 8080);
 

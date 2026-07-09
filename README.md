@@ -1,14 +1,14 @@
 ## Okta Calculator MCP Server
 
-**Simple MCP server that exposes basic calculator tools and validates an Okta access token on every call.**
+**Simple MCP server (Streamable HTTP) that exposes basic calculator tools and validates an Okta access token on tool calls.**
 
 ### Features
 
 - **Calculator tools**: `add`, `subtract`, `multiply`, `divide`
-- **Okta token acceptance**: each tool requires an `oktaToken` argument
+- **Okta auth via Bearer token**: tool calls require an `Authorization: Bearer <okta-jwt>` header
 - **Validation**: the server verifies the token as a JWT signed by Okta using the Okta JWKS endpoint
-  - Checks issuer and (optionally) audience
-  - Verifies signature and expiry
+  (signature, issuer, audience, expiry)
+- Discovery calls (`initialize`, `tools/list`) work without a token, so gateways can list tools
 
 ### Prerequisites
 
@@ -16,72 +16,54 @@
 
 ### Configuration
 
-Everything is hardcoded in `src/server.ts`:
+Okta config is hardcoded in `src/server.ts`:
 
 - **Issuer**: `https://truefoundry.okta.com` (Okta org authorization server)
 - **Audience**: `https://truefoundry.okta.com`
 - **JWKS**: `https://truefoundry.okta.com/oauth2/v1/keys`
 
-To change any of these, edit the constants at the top of `src/server.ts` and rebuild.
+The HTTP port defaults to `8080` and can be overridden with the `PORT` env var.
 
-### Install
+### Install, build and run
 
 ```bash
-cd /Users/naman/Code/local/cdk-demo/mcp-passhtrough
 npm install
-```
-
-### Build and run
-
-```bash
-# Build TypeScript to JavaScript
 npm run build
-
-# Run the MCP server over stdio
 npm start
 ```
 
-For local testing during development, you can also run it directly with `tsx`:
+For local development:
 
 ```bash
 npm run dev
 ```
 
+### Endpoints
+
+- `POST /mcp` (and `POST /`): MCP Streamable HTTP endpoint
+- `GET /health`: health probe, returns `{"status":"ok"}`
+
 ### MCP tools
 
-Each tool takes the same arguments:
-
-- **`a`**: number
-- **`b`**: number
-- **`oktaToken`**: string – the Okta access token (raw JWT)
-
-Tools:
+Each tool takes `a` and `b` (numbers):
 
 - **`add`**: returns `a + b`
 - **`subtract`**: returns `a - b`
 - **`multiply`**: returns `a * b`
 - **`divide`**: returns `a / b` (errors on divide-by-zero)
 
-If the Okta token is invalid, expired, or fails signature/issuer/audience checks, the tool returns an error response with the message:
+Tool calls without a valid Okta Bearer token get HTTP 401:
 
-> `Invalid or expired Okta token.`
+> `Unauthorized: invalid or missing Okta token.`
 
-### Wiring into an MCP client
+### Docker
 
-In your MCP-capable client (e.g. Cursor, Claude Desktop, MCP Inspector), configure this server as a stdio MCP with a command like:
-
-```json
-{
-  "mcpServers": {
-    "okta-calculator-mcp": {
-      "command": "node",
-      "args": [
-        "dist/server.js"
-      ]
-    }
-  }
-}
+```bash
+docker build -t okta-calculator-mcp .
+docker run -p 8080:8080 okta-calculator-mcp
 ```
 
-Once configured, you should see the `add`, `subtract`, `multiply`, and `divide` tools, each requiring an `oktaToken` parameter, and they will only execute when the provided token is a valid Okta JWT.
+### TrueFoundry MCP Gateway
 
+Register the deployed URL as a remote MCP server with **Token Passthrough** auth,
+so the gateway forwards the caller's Okta Bearer token to this server on tool calls.
